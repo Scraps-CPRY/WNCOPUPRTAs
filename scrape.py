@@ -1,10 +1,14 @@
-import json, os, re, sys, time, subprocess, urllib.request
+import json, os, re, sys, time, subprocess, urllib.request, io
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from PIL import Image
 
 BASE = "https://femdom-joi.com/"
 UA = {"User-Agent": "Mozilla/5.0 (compatible; feedbot/1.0)"}
 LAST_PAGE = 4377
+SHARD = 50
+IMGDIR = "img"
+ARCDIR = "arc"
 MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
 
 def get(url, tries=3):
@@ -19,6 +23,23 @@ def get(url, tries=3):
 
 def page_url(n):
     return BASE if n <= 1 else BASE + "page/%d/" % n
+
+def thumb(src, vid):
+    if not src:
+        return ""
+    p = os.path.join(IMGDIR, vid + ".webp")
+    if os.path.exists(p) and os.path.getsize(p) > 0:
+        return "img/" + vid + ".webp"
+    try:
+        req = urllib.request.Request(src, headers=UA)
+        with urllib.request.urlopen(req, timeout=25) as r:
+            data = r.read(6000000)
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+        im.thumbnail((320, 320))
+        im.save(p, "WEBP", quality=65, method=4)
+        return "img/" + vid + ".webp"
+    except Exception:
+        return ""
 
 def parse(doc):
     out = []
@@ -46,7 +67,8 @@ def parse(doc):
             "performer": performer,
             "type": vtype,
             "ts": ts,
-            "img": i.group(1) if i else "",
+            "src": i.group(1) if i else "",
+            "img": "",
         })
     return out
 
@@ -70,11 +92,20 @@ def load_index():
     return json.load(open("index.json")) if os.path.exists("index.json") else []
 
 def enrich(items):
+    def one(it):
+        it["cats"] = cats_of(it["url"])
+        it["img"] = thumb(it.get("src"), it["id"])
+        return it
     with ThreadPoolExecutor(max_workers=10) as ex:
-        cats = list(ex.map(lambda x: cats_of(x["url"]), items))
-    for it, c in zip(items, cats):
-        it["cats"] = c
+        list(ex.map(one, items))
     return items
+
+def shard_path(page):
+    return os.path.join(ARCDIR, "g%04d.jsonl" % ((page - 1) // SHARD + 1))
+
+def write_shards():
+    names = sorted(f for f in os.listdir(ARCDIR) if f.endswith(".jsonl"))
+    json.dump({"shards": names}, open(os.path.join(ARCDIR, "index.json"), "w"))
 
 def cycle(enrich_limit=0, enrich_only_new=True):
     index = load_index()
@@ -96,35 +127,70 @@ def cycle(enrich_limit=0, enrich_only_new=True):
     print("%d nuevos, %d total" % (len(added), len(index)))
 
 def archive(minutes):
+    os.makedirs(IMGDIR, exist_ok=True)
+    os.makedirs(ARCDIR, exist_ok=True)
     state = json.load(open("state.json")) if os.path.exists("state.json") else {}
     page = state.get("page", 3)
     end = time.time() + minutes * 60
     batch = 0
-    with open("arc.jsonl", "a", encoding="utf-8") as out:
-        while page <= LAST_PAGE and time.time() < end:
-            items = parse(get(page_url(page)))
-            if not items:
-                page += 1
-                time.sleep(2)
-                continue
+    cur = None
+    while page <= LAST_PAGE and time.time() < end:
+        path = shard_path(page)
+        if path != cur:
+            if cur:
+                write_shards()
+            cur = path
+        items = parse(get(page_url(page)))
+        if not items:
+            page += 1
+            time.sleep(2)
+            continue
+        with open(cur, "a", encoding="utf-8") as out:
             for it in enrich(items):
                 out.write(json.dumps(it, ensure_ascii=False) + "\n")
-            out.flush()
-            page += 1
-            batch += 1
-            if batch % 40 == 0:
-                state["page"] = page
-                json.dump(state, open("state.json", "w"))
-                push()
-            time.sleep(0.8)
+        page += 1
+        batch += 1
+        if batch % 25 == 0:
+            write_shards()
+            state["page"] = page
+            json.dump(state, open("state.json", "w"))
+            push()
+        time.sleep(0.6)
+    write_shards()
     state["page"] = page
     state["done"] = page > LAST_PAGE
     json.dump(state, open("state.json", "w"))
     push()
     print("archivo en pagina %d de %d" % (page, LAST_PAGE))
 
+def repair():
+    os.makedirs(IMGDIR, exist_ok=True)
+    files = [("json", "index.json")] + [("jsonl", os.path.join(ARCDIR, f)) for f in sorted(os.listdir(ARCDIR)) if f.endswith(".jsonl")]
+    n = 0
+    for kind, fp in files:
+        if not os.path.exists(fp):
+            continue
+        recs = json.load(open(fp)) if kind == "json" else [json.loads(l) for l in open(fp, encoding="utf-8") if l.strip()]
+        todo = [r for r in recs if r.get("id") and not (r.get("img") or "").startswith("img/")]
+        if not todo:
+            continue
+        def one(r):
+            r["img"] = thumb(r.get("src") or r.get("img"), r["id"])
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            list(ex.map(one, todo))
+        if kind == "json":
+            json.dump(recs, open(fp, "w"), ensure_ascii=False)
+        else:
+            open(fp, "w", encoding="utf-8").write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs))
+        n += len(todo)
+        print("reparadas %d" % n)
+        push()
+    print("total reparadas %d" % n)
+
 if __name__ == "__main__":
-    if "--archive" in sys.argv:
+    if "--repair" in sys.argv:
+        repair()
+    elif "--archive" in sys.argv:
         archive(int(sys.argv[sys.argv.index("--minutes") + 1]) if "--minutes" in sys.argv else 10)
     else:
         mins = int(sys.argv[sys.argv.index("--minutes") + 1]) if "--minutes" in sys.argv else 10
