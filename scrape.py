@@ -104,7 +104,9 @@ def shard_path(page):
     return os.path.join(ARCDIR, "g%04d.jsonl" % ((page - 1) // SHARD + 1))
 
 def write_shards():
-    names = sorted(f for f in os.listdir(ARCDIR) if f.endswith(".jsonl"))
+    names = ["arc/" + f for f in sorted(os.listdir(ARCDIR)) if f.endswith(".jsonl")]
+    if os.path.exists("arc.jsonl") and os.path.getsize("arc.jsonl") > 0:
+        names.insert(0, "arc.jsonl")
     json.dump({"shards": names}, open(os.path.join(ARCDIR, "index.json"), "w"))
 
 def cycle(enrich_limit=0, enrich_only_new=True):
@@ -166,6 +168,8 @@ def archive(minutes):
 def repair():
     os.makedirs(IMGDIR, exist_ok=True)
     files = [("json", "index.json")] + [("jsonl", os.path.join(ARCDIR, f)) for f in sorted(os.listdir(ARCDIR)) if f.endswith(".jsonl")]
+    if os.path.exists("arc.jsonl"):
+        files.append(("jsonl", "arc.jsonl"))
     n = 0
     for kind, fp in files:
         if not os.path.exists(fp):
