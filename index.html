@@ -54,16 +54,16 @@
   <div class="foot">Datos de femdom-joi.com · ordenado de nuevo a viejo</div>
 </div>
 <script>
-const BASE = "";
+const CDN = "https://cdn.jsdelivr.net/gh/Scraps-CPRY/WNCOPUPRTAs@main/";
 const $ = (i) => document.getElementById(i);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-let all = [], seen = new Set(), shown = 60, tokCache = new Map();
+let all = [], seen = new Set(), shown = 60, tokCache = new Map(), shards = [], si = -1, loading = false;
 
 function norm(s) { return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); }
 
 function tokens(it) {
   if (tokCache.has(it.id)) return tokCache.get(it.id);
-  const t = new Set((norm(it.title) + " " + norm(it.performer) + " " + norm(it.type) + " " + (it.cats || []).join(" ") + " " + (it.cat || "")).split(/[^a-z0-9]+/).filter(Boolean));
+  const t = new Set((norm(it.title) + " " + norm(it.performer) + " " + norm(it.type) + " " + (it.cats || []).join(" ")).split(/[^a-z0-9]+/).filter(Boolean));
   tokCache.set(it.id, t);
   return t;
 }
@@ -86,9 +86,7 @@ function dist(a, b, max) {
 }
 
 function wordHit(tk, w, fuzzy) {
-  for (const t of tk) {
-    if (t === w || t.startsWith(w)) return true;
-  }
+  for (const t of tk) if (t === w || t.startsWith(w)) return true;
   if (!fuzzy || w.length < 4) return false;
   const max = w.length >= 8 ? 2 : 1;
   for (const t of tk) if (dist(w, t, max) <= max) return true;
@@ -121,12 +119,14 @@ function render(reset) {
   $("stats").textContent = l.length + " de " + all.length;
   const s = l.slice(0, shown);
   $("feed").innerHTML = s.length ? s.map(card).join("") : '<div class="empty">Nada coincide.</div>';
-  $("more").hidden = l.length <= shown;
+  $("more").hidden = l.length <= shown && si < 0;
 }
 
 function card(it) {
+  const p = it.img || "";
   return '<a class="card" href="' + esc(it.url) + '" target="_blank" rel="noopener">' +
-    '<div class="thumb"><img loading="lazy" src="' + esc(it.img) + '" alt="" onerror="this.style.display=\'none\'"></div>' +
+    '<div class="thumb"><img loading="lazy" src="' + esc(p) + '" alt="" data-p="' + esc(p) + '" ' +
+    'onerror="this.onerror=null;this.src=\'' + CDN + '\'+this.dataset.p"></div>' +
     '<div class="meta"><p class="t">' + esc(it.title) + '</p><div class="tags">' +
     (it.type ? '<span>' + esc(it.type) + '</span>' : '') +
     (it.performer ? '<span>' + esc(it.performer) + '</span>' : '') +
@@ -141,22 +141,38 @@ async function loadFile(url) {
     const t = await r.text();
     if (url.endsWith(".jsonl")) return t.split("\n").filter(Boolean).map((l) => JSON.parse(l));
     const j = JSON.parse(t);
-    return Array.isArray(j) ? j : [];
+    return Array.isArray(j) ? j : (j.shards || []);
   } catch (e) { return []; }
+}
+
+function merge(arr) {
+  for (const it of arr) if (it && it.id && !seen.has(it.id)) { seen.add(it.id); all.push(it); }
+  all.sort((a, b) => b.ts - a.ts);
+}
+
+async function nextShard() {
+  while (si >= 0) {
+    const name = shards[si--];
+    const arr = await loadFile("arc/" + name);
+    if (arr.length) { merge(arr); return true; }
+  }
+  return false;
 }
 
 async function load() {
   $("status").textContent = "leyendo…";
+  $("load").textContent = "";
   try {
-    const parts = await Promise.all([loadFile("index.json"), loadFile("arc.jsonl")]);
-    const merged = [];
-    seen = new Set();
-    for (const arr of parts) for (const it of arr) if (it && it.id && !seen.has(it.id)) { seen.add(it.id); merged.push(it); }
-    if (!merged.length) throw new Error("sin datos todavía");
-    all = merged.sort((a, b) => b.ts - a.ts);
+    all = []; seen = new Set(); tokCache = new Map(); shards = []; si = -1;
+    merge(await loadFile("index.json"));
+    shards = (await loadFile("arc/index.json")).slice().reverse();
+    si = shards.length - 1;
+    await nextShard();
+    if (!all.length) throw new Error("sin datos todavía");
     const types = [...new Set(all.map((x) => x.type).filter(Boolean))].sort();
     const cats = [...new Set(all.flatMap((x) => x.cats || []))].sort();
     const ts = $("type"), cs = $("cat");
+    ts.length = 1; cs.length = 1;
     types.forEach((t) => { const o = document.createElement("option"); o.value = t; o.textContent = t; ts.appendChild(o); });
     cats.forEach((c) => { const o = document.createElement("option"); o.value = c; o.textContent = c.replace(/-/g, " "); cs.appendChild(o); });
     $("status").textContent = "actualizado " + new Date().toLocaleTimeString("es-PR", { hour: "2-digit", minute: "2-digit" });
@@ -170,7 +186,15 @@ async function load() {
 $("feed").addEventListener("click", (e) => { if (e.target.tagName !== "IMG") { const c = e.target.closest(".card"); if (c) window.open(c.href, "_blank"); } });
 let deb;
 ["q", "perf", "type", "cat", "fuzzy"].forEach((i) => $(i).addEventListener("input", () => { clearTimeout(deb); deb = setTimeout(() => render(true), 160); }));
-$("more").onclick = () => { shown += 60; render(); };
+$("more").onclick = async () => {
+  shown += 60;
+  if (shown > all.length && si >= 0 && !loading) {
+    loading = true; $("load").textContent = "cargando…";
+    while (shown > all.length && si >= 0) await nextShard();
+    loading = false; $("load").textContent = "";
+  }
+  render();
+};
 $("refresh").onclick = load;
 load();
 </script>
