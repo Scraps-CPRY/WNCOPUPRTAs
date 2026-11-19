@@ -1,0 +1,18 @@
+name: archive
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: archive
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          git config user.name feedbot
+          git config user.email feedbot@users.noreply.github.com
+          python scrape.py --archive --minutes 330
