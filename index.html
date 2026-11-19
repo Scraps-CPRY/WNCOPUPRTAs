@@ -153,7 +153,7 @@ function merge(arr) {
 async function nextShard() {
   while (si >= 0) {
     const name = shards[si--];
-    const arr = await loadFile("arc/" + name);
+    const arr = await loadFile(name);
     if (arr.length) { merge(arr); return true; }
   }
   return false;
